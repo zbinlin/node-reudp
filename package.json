@@ -1,0 +1,28 @@
+{
+  "name": "reudp",
+  "version": "1.0.0",
+  "description": "Reliable UDP implementation for Node",
+  "main": "index.js",
+  "scripts": {
+    "test": "mocha **/__tests__/**/*.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zbinlin/node-reudp.git"
+  },
+  "keywords": [
+    "udp",
+    "reliable",
+    "rudp"
+  ],
+  "author": "zbinlin",
+  "license": "GPL-3.0",
+  "bugs": {
+    "url": "https://github.com/zbinlin/node-reudp/issues"
+  },
+  "homepage": "https://github.com/zbinlin/node-reudp#readme",
+  "devDependencies": {
+    "chai": "^3.5.0",
+    "mocha": "^3.0.2"
+  }
+}
