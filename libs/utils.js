@@ -1,17 +1,18 @@
 "use strict";
 
-const utils = module.exports = {};
-
 const asc = (a, b) => Math.sign(a - b);
 //const dsc = (a, b) => Math.sign(b - a);
 const unique = ary => [...new Set(ary).values()];
+
+const utils = module.exports = {};
+utils.checksum = require("./checksum.js");
 
 /**
  * compress continuous sequence number
  * @param {number[]} ary
  * @param {number[]}
  */
-utils.zipSeqArray = function zipSeqArray(ary) {
+utils.zipSequences = function zipSequences(ary) {
     if (!Array.isArray(ary)) {
         throw new TypeError("argument 0 must be an array");
     }
@@ -58,7 +59,7 @@ utils.zipSeqArray = function zipSeqArray(ary) {
  * @param {number[]} ary
  * @return {number[]}
  */
-utils.unzipSeqArray = function unzipSeqArray(ary) {
+utils.unzipSequences = function unzipSequences(ary) {
     if (!Array.isArray(ary)) {
         throw new TypeError("argument 0 must be an array");
     }
