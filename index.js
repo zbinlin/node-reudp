@@ -6,8 +6,6 @@ const utils = require("./libs/utils.js");
 
 const { SendingSession, ReceivingSession } = require("./libs/sessions.js");
 
-console.log = function () {};
-
 const MAX_COUNTER = Math.pow(2, 32);
 const MAX_PACKAGE_SIZE = 500;
 const MAX_BUFFER_SIZE = Math.pow(2, 15) * MAX_PACKAGE_SIZE;
@@ -41,8 +39,6 @@ const UDP_CODE_TYPES = new Map([
 const ERR_NOT_FOUND_ID = 0x00;
 const RETRY_NOTIFIY_FIN_COUNT = 10;
 const RETRY_REQUEST_COUNT = 10;
-let i = 0;
-let j = 0;
 
 class ReUDP extends EventEmitter {
     constructor(options = {}) {
@@ -219,14 +215,20 @@ class ReUDP extends EventEmitter {
 
         // duplicate package
         if (Buffer.isBuffer(buffers[seq])) {
-            ++i;
-            console.error(`duplicate: ${i / total * 100}%, ${seq}`);
+            if (!buffers.__i__) {
+                buffers.__i__ = 0;
+            }
+            buffers.__i__ += 1;
+            console.error(`duplicate: ${buffers.__i__ / total * 100}%, ${id}, ${seq}`);
             //console.error(`received duplicate seq id:${id}, seq:${seq}, singleTotal:${singleTotal}, total:${total}`);
             return;
         }
 
-        ++j;
-        console.error(`progress: ${j / total * 100}%, seq: ${seq}`);
+        if (!buffers.__j__) {
+            buffers.__j__ = 0;
+        }
+        buffers.__j__ += 1;
+        console.error(`progress: ${buffers.__j__ / total * 100}%, ${id}, seq: ${seq}`);
         buffers[seq] = data;
 
         this._delayResponsePshPackage(buffers, { id, singleTotal, total }, rinfo);
@@ -529,7 +531,7 @@ class ReUDP extends EventEmitter {
         });
     }
 
-    send(buffer, rinfo) {
+    send(buffer, rinfo, onDrain) {
         if (!rinfo) {
             if (!this._remoteAddress) {
                 throw new Error("remote address must be specify!");
@@ -550,11 +552,22 @@ class ReUDP extends EventEmitter {
             throw new RangeError(`buffer must be bwtween 0 and ${MAX_BUFFER_SIZE}`);
         }
         const id = this._sendingSession.getIdBy(rinfo);
+        if (typeof onDrain === "function") {
+            this.on("drain", function _(sid, rinfo) {
+                if (id === sid) {
+                    this.removeListener("drain", _);
+                    onDrain(sid, rinfo);
+                }
+
+            });
+        }
         this._sendPshPackage(buffer, id, rinfo);
         return id;
     }
 
     close() {
+        if (this.closed) return;
+
         this.closed = true;
 
         clearInterval(this._fnqId);
