@@ -63,6 +63,10 @@ describe("test unzippedAry function", function () {
         const expected3 = [0x10, 0x11, 0x13, 0x14, 0x15, 0x16];
         expect(utils.unzipSequences(test3)).to.be.eql(expected3);
 
+        const test4 = [0x8000, 0x8000];
+        const expected4 = [0x00];
+        expect(utils.unzipSequences(test4)).to.be.eql(expected4);
+
         expect(utils.unzipSequences([])).to.be.eql([]);
     });
     it("throws error when argument 0 was not an array", function () {
@@ -71,13 +75,9 @@ describe("test unzippedAry function", function () {
             utils.unzipSequences(test);
         }).to.be.throw(Error);
     });
-    it("throws error when array contains single range integer", function () {
-        expect(function () {
-            utils.unzipSequences([0x8000]);
-        }).to.be.throw(Error);
-        expect(function () {
-            utils.unzipSequences([0xf000]);
-        }).to.be.throw(Error);
+    it("strips single range integer", function () {
+        expect(utils.unzipSequences([0x8000])).to.be.eql([0x00]);
+        expect(utils.unzipSequences([0x01, 0x8010])).to.be.eql([0x01, 0x10]);
     });
     it("returns sorted and compressed array", function () {
         const test1 = [0x8020, 0x8030, 0x8022, 0x8032];

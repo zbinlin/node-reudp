@@ -79,7 +79,8 @@ utils.unzipSequences = function unzipSequences(ary) {
                     unzippedAry.push(j);
                 }
             } else {
-                throw new RangeError(`malformed range: [${curr}, ${next}]`);
+                unzippedAry.push(start);
+                i -= 1;
             }
         } else {
             unzippedAry.push(curr);
