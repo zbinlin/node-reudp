@@ -91,3 +91,38 @@ describe("test unzippedAry function", function () {
         expect(utils.unzipSequences(test1)).to.be.eql(expected1);
     });
 });
+
+
+describe("test xor function", function () {
+    function generateRandomBuffer(len) {
+        const buffer = Buffer.alloc(len);
+        for (let i = 0; i < len; i++) {
+            buffer.writeUInt8(Math.floor(Math.random() * 256), i);
+        }
+        return buffer;
+    }
+    it("returns same buffer when xor the buffer twice", function () {
+        const count = 100;
+        const range = [0, 1000];
+        for (let i = 0; i < count; i++) {
+            let len = Math.floor(Math.random() * (range[1] - range[0])) + range[0];
+            let buffer = generateRandomBuffer(len);
+            let newBuffer = utils.xor(utils.xor(buffer));
+            expect(newBuffer).to.be.not.equal(buffer);
+            expect(buffer.equals(newBuffer)).to.be.true;
+        }
+    });
+    it("throws TypeError when argument 0 was not a buffer", function () {
+        expect(function () {
+            utils.xor([]);
+        }).to.be.throw(TypeError);
+
+        expect(function () {
+            utils.xor("");
+        }).to.be.throw(TypeError);
+
+        expect(function () {
+            utils.xor({});
+        }).to.be.throw(TypeError);
+    });
+});

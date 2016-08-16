@@ -72,7 +72,7 @@ class ReUDP extends EventEmitter {
 
         const socket = this._getSocketBy(options);
         socket.on("message", (msg, rinfo) => {
-            this._receive(msg, rinfo);
+            this._receive(utils.xor(msg), rinfo);
         });
         this._socket = socket;
         if (options.port) {
@@ -617,7 +617,7 @@ class ReUDP extends EventEmitter {
         } else {
             console.error("can not find address to sends buffer");
         }
-        const buf = utils.checksum.generate(buffer);
+        const buf = utils.xor(utils.checksum.generate(buffer));
         this._socket.send(buf, 0, buf.length, port, address);
     }
 

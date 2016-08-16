@@ -88,3 +88,36 @@ utils.unzipSequences = function unzipSequences(ary) {
     }
     return unique(unzippedAry);
 };
+
+
+/**
+ * use the first word from the buffer to xor the buffer
+ * @param {Buffer} buffer
+ * @return {Buffer}
+ */
+utils.xor = function xor(buffer) {
+    if (!Buffer.isBuffer(buffer)) {
+        throw new TypeError("argument 0 must be a Buffer");
+    }
+    const newBuffer = Buffer.from(buffer); // copied, not shared
+    const len = newBuffer.length;
+    const UNIT = 4;
+    if (len <= UNIT) {
+        return newBuffer;
+    }
+    const remaining = len % UNIT;
+    const count = Math.floor(len / UNIT);
+    const pw = newBuffer.readInt32BE(0);
+    for (let i = 1; i < count; i++) {
+        const cursor = i * UNIT;
+        const val = newBuffer.readInt32BE(cursor);
+        newBuffer.writeInt32BE(val ^ pw, cursor);
+    }
+    if (remaining) {
+        for (let i = count * 4; i < len; i++) {
+            const val = newBuffer.readUInt8(i);
+            newBuffer.writeUInt8(val ^ (pw >>> 24) & 0xFF, i);
+        }
+    }
+    return newBuffer;
+};
