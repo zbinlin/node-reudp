@@ -40,7 +40,25 @@ const ERR_NOT_FOUND_ID = 0x00;
 const RETRY_NOTIFIY_FIN_COUNT = 10;
 const RETRY_REQUEST_COUNT = 10;
 
+/**
+ * @typedef {Object} Address
+ * @property {number} port
+ * @property {string} [address="127.0.0.1"]
+ * @property {string} [family="IPv4"]
+ */
+
 class ReUDP extends EventEmitter {
+    /**
+     * @param {Object} [options={}]
+     * @property {number} [options.parallelCount]
+     * @property {number} [options.remotePort]
+     * @property {string} [options.remoteAddress]
+     * @property {string} [options.remoteFamily]
+     * @property {number} [options.port]
+     * @property {string} [options.address]
+     * @property {string} [options.family]
+     * @property {Socket} [options.socket] - udp socket
+     */
     constructor(options = {}) {
         super();
         this._parallelCount = options.parallelCount || PARALLEL_COUNT;
@@ -48,7 +66,7 @@ class ReUDP extends EventEmitter {
             this._remoteAddress = {
                 port: options.remotePort,
                 address: options.remoteAddress,
-                family: "IPv4",
+                family: options.remoteFamily,
             };
         }
 
@@ -125,7 +143,16 @@ class ReUDP extends EventEmitter {
             }
         }, 1000);
     }
-    _getSocketBy(options) {
+
+    /**
+     * @private
+     * @param {Object} [options={}]
+     * @property {Socket} [options.socket]
+     * @property {string} [options.type="udp4"]
+     * @property {bool} [options.reuseAddr]
+     * @return {Socket} - udp socket
+     */
+    _getSocketBy(options = {}) {
         if (options.socket) {
             return options.socket;
         }
@@ -133,10 +160,21 @@ class ReUDP extends EventEmitter {
             type: "udp4",
         }, options));
     }
+    /**
+     * @public
+     * @external https://nodejs.org/api/dgram.html#dgram_socket_bind_port_address_callback
+     * @external https://nodejs.org/api/dgram.html#dgram_socket_bind_options_callback
+     */
     bind(...args) {
         return this._socket.bind(...args);
     }
 
+    /**
+     * @private
+     * @param {Buffer[]} buffers
+     * @param {number} total
+     * @return {bool}
+     */
     _checkBuffersFull(buffers, total) {
         if (buffers.length !== total) return false;
         for (let i = 0; i < total; i++) {
@@ -145,6 +183,13 @@ class ReUDP extends EventEmitter {
         return true;
     }
 
+    /**
+     * @private
+     * @param {Buffer[]} buffers
+     * @param {number} singleTotal
+     * @param {number} total
+     * @return {Buffer[]}
+     */
     _getHolesFrom(buffers, singleTotal, total) {
         const ary = [];
         let i = buffers._lastIndex || 0;
@@ -158,6 +203,12 @@ class ReUDP extends EventEmitter {
         return ary;
     }
 
+    /**
+     * @private
+     * @param {number} id
+     * @param {Buffer[]} buffers
+     * @param {Address} rinfo
+     */
     _finish(id, buffers, rinfo) {
         const { port, address, family } = rinfo;
         const buffer = Buffer.concat(buffers);
@@ -171,16 +222,36 @@ class ReUDP extends EventEmitter {
         this.emit("message", buffer, rinfo, id);
     }
 
+    /**
+     * @private
+     * @param {number} id
+     * @param {Address} rinfo
+     */
     _notifyReqTimeout(id, rinfo) {
         this._receivingSession.delete(id, rinfo);
     }
 
+    /**
+     * @private
+     * @param {Buffer[]} buffers
+     * @param {Object} info
+     * @property {number} info.id
+     * @property {number} info.singleTotal
+     * @property {number} info.total
+     * @param {Address} rinfo
+     */
     _request(buffers, { id, singleTotal, total }, rinfo) {
         const holes = this._getHolesFrom(buffers, singleTotal, total);
         console.log(`@_request():: id:${id}, singleTotal:${singleTotal}, total:${total}, holes:${holes}`);
         this._sendReqPackage(id, holes, rinfo);
     }
 
+    /**
+     * @private
+     * @param {Buffer[]} buffers
+     * @param {Object} info
+     * @param {Address} rinfo
+     */
     _delayResponsePshPackage(buffers, info, rinfo) {
         if (buffers._delayTimerId) clearTimeout(buffers._delayTimerId);
         buffers._delayTimerId = setTimeout(() => {
@@ -189,6 +260,12 @@ class ReUDP extends EventEmitter {
         }, LATENCY);
     }
 
+    /**
+     * @private
+     * @param {Buffer[]} buffers
+     * @param {Object} info
+     * @param {Address} rinfo
+     */
     _responsePshPackage(buffers, info, rinfo) {
         const { id, total } = info;
         console.log(`@_responsePshPackage():: id:${id}`);
@@ -202,6 +279,16 @@ class ReUDP extends EventEmitter {
         }
     }
 
+    /**
+     * @private
+     * @param {Object} info
+     * @property {number} info.id
+     * @property {number} info.seq
+     * @property {number} info.singleTotal
+     * @property {number} info.total
+     * @property {Buffer} info.data
+     * @param {Address} rinfo
+     */
     _handlePshPackage({ id, seq, singleTotal, total, data }, rinfo) {
         console.log(`@_handlePshPackage():: id:${id}, seq:${seq}, singleTotal: ${singleTotal}, total:${total}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
         const buffers = this._receivingSession.get(id, rinfo);
@@ -234,6 +321,13 @@ class ReUDP extends EventEmitter {
         this._delayResponsePshPackage(buffers, { id, singleTotal, total }, rinfo);
     }
 
+    /**
+     * @private
+     * @param {Object} info
+     * @property {number} info.id
+     * @property {number[]} info.sequences
+     * @param {Address} rinfo
+     */
     _handleReqPackage({ id, sequences }, rinfo) {
         console.log(`@_handleReqPackage():: id:${id}, sequences:${sequences}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
         const session = this._sendingSession.get(id, rinfo);
@@ -247,6 +341,12 @@ class ReUDP extends EventEmitter {
         });
     }
 
+    /**
+     * @private
+     * @param {Object} info
+     * @property {number} info.id
+     * @param {Address} rinfo
+     */
     _handleFinPackage({ id }, rinfo) {
         console.log(`@_handleFinPackage():: id:${id}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
         const session = this._sendingSession.get(id, rinfo);
@@ -259,6 +359,13 @@ class ReUDP extends EventEmitter {
         this._sendAckPackage(id, UDP_FIN, rinfo);
     }
 
+    /**
+     * @private
+     * @param {Object} info
+     * @property {number} info.id
+     * @property {symbol} info.ackType
+     * @param {Address} rinfo
+     */
     _handleAckPackage({ id, ackType }, rinfo) {
         console.log(`@_handleAckPackage():: id:${id}, ackType:${ackType.toString()}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
         switch (ackType) {
@@ -278,6 +385,13 @@ class ReUDP extends EventEmitter {
         }
     }
 
+    /**
+     * @private
+     * @param {Object} info
+     * @property {number} info.id
+     * @property {symbol} info.errType
+     * @param {Address} rinfo
+     */
     _handleErrPackage({ id, errType }, rinfo) {
         console.log(`@_handleAckPackage():: id:${id}, errType:${errType.toString()}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
         switch (errType) {
@@ -287,6 +401,13 @@ class ReUDP extends EventEmitter {
         }
     }
 
+    /**
+     * @private
+     * @param {Buffer} buffer
+     * @return {Object} header
+     * @property {symbol} header.type
+     * @property {number} header.id
+     */
     _parseHeader(buffer) {
         let cursor = 0;
         const typeCode = buffer.readUInt8(cursor);
@@ -296,6 +417,16 @@ class ReUDP extends EventEmitter {
         return ({ type, id });
     }
 
+    /**
+     * @private
+     * @param {Buffer} buffer
+     * @param {number} cursor
+     * @return {Object} info
+     * @property {number} info.seq
+     * @property {number} info.singleTotal
+     * @property {number} info.total
+     * @property {buffer} info.data
+     */
     _parsePshPackage(buffer, cursor) {
         const seq = buffer.readUInt16BE(cursor);
         cursor += 2;
@@ -311,6 +442,12 @@ class ReUDP extends EventEmitter {
         return ({ seq, singleTotal, total, data });
     }
 
+    /**
+     * @private
+     * @param {Buffer} buffer
+     * @param {number} cursor
+     * @return {{sequences: number[]}}
+     */
     _parseReqPackage(buffer, cursor) {
         const sequences = [];
         for (let i = cursor, len = buffer.length; i < len; i += 2) {
@@ -320,6 +457,12 @@ class ReUDP extends EventEmitter {
         return ({ sequences: utils.unzipSequences(sequences) });
     }
 
+    /**
+     * @private
+     * @param {Buffer} buffer
+     * @param {number} cursor
+     * @return {{ackType: symbol}}
+     */
     _parseAckPackage(buffer, cursor) {
         const ackTypeCode = buffer.readUInt8(cursor);
         return ({
@@ -327,6 +470,12 @@ class ReUDP extends EventEmitter {
         });
     }
 
+    /**
+     * @private
+     * @param {Buffer} buffer
+     * @param {number} cursor
+     * @return {{errType: symbol}}
+     */
     _parseErrPackage(buffer, cursor) {
         const errTypeCode = buffer.readUInt16BE(cursor);
         return ({
@@ -334,6 +483,11 @@ class ReUDP extends EventEmitter {
         });
     }
 
+    /**
+     * @private
+     * @param {Buffer} buffer
+     * @return {?Object}
+     */
     _parse(buffer) {
         const header = this._parseHeader(buffer);
         let cursor = 6;
@@ -366,6 +520,11 @@ class ReUDP extends EventEmitter {
         }
     }
 
+    /**
+     * @private
+     * @param {Buffer} buffer
+     * @param {Address} rinfo
+     */
     _receive(buffer, rinfo) {
         if (!utils.checksum.verify(buffer)) {
             console.log(`checksum failure, ${buffer}`);
@@ -378,6 +537,12 @@ class ReUDP extends EventEmitter {
         this.emit(this._events[result.type], result, rinfo);
     }
 
+    /**
+     * @private
+     * @param {number} id
+     * @param {number[]} holes
+     * @param {Address} rinfo
+     */
     _sendReqPackage(id, holes, rinfo) {
         let len = 0;
         const header = this._packHeader(UDP_REQ, id);
@@ -394,6 +559,12 @@ class ReUDP extends EventEmitter {
         this._send(Buffer.concat([header, buf], len), rinfo);
     }
 
+    /**
+     * @private
+     * @param {number} id
+     * @param {symbol} type
+     * @param {Address} rinfo
+     */
     _sendAckPackage(id, type, rinfo) {
         let len = 0;
         const header = this._packHeader(UDP_ACK, id);
@@ -406,11 +577,22 @@ class ReUDP extends EventEmitter {
         this._send(Buffer.concat([header, ackTypeBuf], len), rinfo);
     }
 
+    /**
+     * @private
+     * @param {number} id
+     * @param {Address} rinfo
+     */
     _sendFinPackage(id, rinfo) {
         const header = this._packHeader(UDP_FIN, id);
         this._send(header, rinfo);
     }
 
+    /**
+     * @private
+     * @param {number} id
+     * @param {symbol} errType
+     * @param {Address}
+     */
     _sendErrPackage(id, errType, rinfo) {
         let len = 0;
         const header = this._packHeader(UDP_ERR, id);
@@ -423,6 +605,11 @@ class ReUDP extends EventEmitter {
         this._send(Buffer.concat([header, errTypeBuf], len), rinfo);
     }
 
+    /**
+     * @private
+     * @param {buffer} buffer
+     * @param {Address} rinfo
+     */
     _send(buffer, rinfo) {
         let port, address;
         if (rinfo) {
@@ -434,6 +621,11 @@ class ReUDP extends EventEmitter {
         this._socket.send(buf, 0, buf.length, port, address);
     }
 
+    /**
+     * @private
+     * @param {symbol} type
+     * @param {number} id
+     */
     _packHeader(type, id) {
         let cursor = 0;
         const header = Buffer.alloc(6);
@@ -443,6 +635,15 @@ class ReUDP extends EventEmitter {
         return header;
     }
 
+    /**
+     * @private
+     * @param {number} id
+     * @param {number} seq
+     * @param {number} parallelCount
+     * @param {number} totalCount
+     * @param {Buffer} buf
+     * @return {Buffer}
+     */
     _packData(id, seq, parallelCount, totalCount, buf) {
         console.log(`@_packData():: id:${id}, seq:${seq}, parallelCount:${parallelCount}, totalCount:${totalCount}`);
         let len = buf.length;
@@ -467,7 +668,12 @@ class ReUDP extends EventEmitter {
         ], len);
     }
 
-    *_generatePackagesBy(id, buffer, initSequences) {
+    /**
+     * @private
+     * @param {number} id
+     * @param {Buffer} buffer
+     */
+    *_generatePackagesBy(id, buffer) {
         const totalCount = Math.ceil(buffer.length / MAX_PACKAGE_SIZE);
         const parallelCount = Math.min(this._parallelCount, totalCount);
         const length = buffer.length;
@@ -488,6 +694,11 @@ class ReUDP extends EventEmitter {
         }
     }
 
+    /**
+     * @private
+     * @param {number[]} a
+     * @param {number[]|Set<number>} b
+     */
     _diffRequestSequences(a, b) {
         if (!(b instanceof Set)) {
             b = new Set(b);
@@ -495,6 +706,13 @@ class ReUDP extends EventEmitter {
         return a.filter(seq => !b.has(seq));
     }
 
+    /**
+     * @private
+     * @param {number} id
+     * @param {Address} rinfo
+     * @param {Object<Generator>} packagesGenerator
+     * @param {number[]} requestSequences
+     */
     _trySend(id, rinfo, packagesGenerator, requestSequences) {
         console.log(`@_trySend:: id:${id}, requestSequences:${requestSequences}`);
         if (packagesGenerator._delayTimerId) clearTimeout(packagesGenerator._delayTimerId);
@@ -523,6 +741,12 @@ class ReUDP extends EventEmitter {
         }, LATENCY);
     }
 
+    /**
+     * @private
+     * @param {Buffer} buffer
+     * @param {number} id
+     * @param {Address} rinfo
+     */
     _sendPshPackage(buffer, id, rinfo) {
         const packagesGenerator = this._generatePackagesBy(id, buffer);
         this._sendingSession.set(id, rinfo, packagesGenerator);
@@ -531,6 +755,13 @@ class ReUDP extends EventEmitter {
         });
     }
 
+    /**
+     * @public
+     * @param {Buffer} buffer
+     * @param {Address} rinfo
+     * @param {Function} [onDrain]
+     * @return {number}
+     */
     send(buffer, rinfo, onDrain) {
         if (!rinfo) {
             if (!this._remoteAddress) {
@@ -565,6 +796,9 @@ class ReUDP extends EventEmitter {
         return id;
     }
 
+    /**
+     * @public
+     */
     close() {
         if (this.closed) return;
 
