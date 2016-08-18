@@ -1,5 +1,6 @@
 "use strict";
 
+const net = require("net");
 const dgram = require("dgram");
 const EventEmitter = require("events");
 const debuglog = require("util").debuglog("reudp");
@@ -8,7 +9,7 @@ const utils = require("./libs/utils.js");
 const { SendingSession, ReceivingSession } = require("./libs/sessions.js");
 
 const MAX_COUNTER = Math.pow(2, 32);
-const MAX_PACKAGE_SIZE = 500;
+const MAX_PACKAGE_SIZE = 1024;
 const MAX_BUFFER_SIZE = Math.pow(2, 15) * MAX_PACKAGE_SIZE;
 const PARALLEL_COUNT = 16;
 const LATENCY = 150; /* ms */
@@ -66,8 +67,9 @@ class ReUDP extends EventEmitter {
         if (options.remotePort) {
             this._remoteAddress = {
                 port: options.remotePort,
-                address: options.remoteAddress,
-                family: options.remoteFamily,
+                address: options.remoteAddress || "127.0.0.1",
+                family: options.remoteFamily ||
+                        (net.isIPv6(options.remoteAddress) ? "IPv6" : "IPv4"),
             };
         }
 
@@ -142,6 +144,8 @@ class ReUDP extends EventEmitter {
                 }
             }
         }, 1000);
+
+        this._drains = new WeakMap();
     }
 
     /**
@@ -360,6 +364,13 @@ class ReUDP extends EventEmitter {
                     rinfo,
                     data: val,
                 }));
+            }
+            const onDrain = this._drains.get(packagesGenerator);
+            if (onDrain) {
+                process.nextTick(() => {
+                    onDrain(id, rinfo);
+                });
+                this._drains.delete(packagesGenerator);
             }
             this.emit("drain", id, rinfo);
             this._sendingSession.delete(id, rinfo);
@@ -767,10 +778,14 @@ class ReUDP extends EventEmitter {
      * @param {Buffer} buffer
      * @param {number} id
      * @param {Address} rinfo
+     * @param {Function} [onDrain]
      */
-    _sendPshPackage(buffer, id, rinfo) {
+    _sendPshPackage(buffer, id, rinfo, onDrain) {
         const packagesGenerator = this._generatePackagesBy(id, buffer);
         this._sendingSession.set(id, rinfo, packagesGenerator);
+        if (typeof onDrain === "function") {
+            this._drains.set(packagesGenerator, onDrain);
+        }
         process.nextTick(() => {
             this._trySend(id, rinfo, packagesGenerator);
         });
@@ -779,15 +794,18 @@ class ReUDP extends EventEmitter {
     /**
      * @public
      * @param {Buffer} buffer
-     * @param {Address} rinfo
+     * @param {Address} [rinfo=this._remoteAddress]
      * @param {Function} [onDrain]
      * @return {number}
      */
     send(buffer, rinfo, onDrain) {
-        if (!rinfo) {
+        if (!rinfo || typeof rinfo === "function") {
             if (!this._remoteAddress) {
                 throw new Error("remote address must be specify!");
             } else {
+                if (typeof rinfo === "function") {
+                    onDrain = rinfo;
+                }
                 rinfo = this._remoteAddress;
             }
         }
@@ -804,16 +822,7 @@ class ReUDP extends EventEmitter {
             throw new RangeError(`buffer must be bwtween 0 and ${MAX_BUFFER_SIZE}`);
         }
         const id = this._sendingSession.getIdBy(rinfo);
-        if (typeof onDrain === "function") {
-            this.on("drain", function _(sid, rinfo) {
-                if (id === sid) {
-                    this.removeListener("drain", _);
-                    onDrain(sid, rinfo);
-                }
-
-            });
-        }
-        this._sendPshPackage(buffer, id, rinfo);
+        this._sendPshPackage(buffer, id, rinfo, onDrain);
         return id;
     }
 
