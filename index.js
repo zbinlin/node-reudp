@@ -222,9 +222,10 @@ class ReUDP extends EventEmitter {
         debuglog(`duplicate: dest, ${JSON.stringify({
             id,
             rinfo,
-            data: buffers.__duplicateCounts__,
+            duplicateRate: buffers.__duplicateCounts__ / (buffers.__total__ + buffers.__duplicateCounts__),
         })}`);
         delete buffers.__duplicateCounts__;
+        delete buffers.__total__;
 
         this._sendFinPackage(id, rinfo);
         this._finishNotifyQueue.add([id, port, address, family]);
@@ -313,13 +314,11 @@ class ReUDP extends EventEmitter {
         // duplicate package
         if (Buffer.isBuffer(buffers[seq])) {
             if (!buffers._used) {
-                if (!buffers.__duplicateCounts__) {
-                    buffers.__duplicateCounts__ = [];
-                }
-                buffers.__duplicateCounts__[seq] = (buffers.__duplicateCounts__[seq] || 0) + 1;
+                buffers.__duplicateCounts__ = (buffers.__duplicateCounts__ || 0) + 1;
             }
             return;
         }
+        buffers.__total__ = total;
 
         buffers[seq] = data;
 
@@ -357,12 +356,12 @@ class ReUDP extends EventEmitter {
         const session = this._sendingSession.get(id, rinfo);
         if (session) {
             const packagesGenerator = session;
-            const { val } = packagesGenerator.next(null); // exit
+            const { value: val } = packagesGenerator.next(null); // exit
             if (val) {
                 debuglog("source,", JSON.stringify({
                     id,
                     rinfo,
-                    data: val,
+                    repeatRate: val,
                 }));
             }
             const onDrain = this._drains.get(packagesGenerator);
@@ -702,12 +701,11 @@ class ReUDP extends EventEmitter {
             [0x8000, 0x8000 | (parallelCount - 1)]
         );
 
-        let counts = [];
-        counts.length = totalCount;
+        let counts = 0;
 
         while (req && req.length > 0) {
             let parallels = req.map(seq => {
-                counts[seq] = (counts[seq] || 0) + 1;
+                counts += 1;
                 const start = seq * MAX_PACKAGE_SIZE;
                 const end = Math.min(start + MAX_PACKAGE_SIZE, length);
                 const buf = buffer.slice(start, end);
@@ -716,7 +714,7 @@ class ReUDP extends EventEmitter {
             req = yield parallels;
         }
 
-        return counts;
+        return counts / totalCount;
     }
 
     /**
@@ -759,7 +757,7 @@ class ReUDP extends EventEmitter {
                 debuglog("source,", JSON.stringify({
                     id,
                     rinfo,
-                    data: packages,
+                    repeatRate: packages,
                 }));
             }
             return;
