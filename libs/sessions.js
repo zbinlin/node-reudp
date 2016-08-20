@@ -27,6 +27,26 @@ class Session {
     [Symbol.iterator](...args) {
         return Reflect.apply(this._super[Symbol.iterator], this._super, args);
     }
+    _convertToId(id, { port, address, family }) {
+        if (family) {
+            let str = String(family).toLowerCase();
+            if (str.toLowerCase() === "ipv6" || str === "6") {
+                family = 6;
+            } else {
+                family = 4;
+            }
+        } else {
+            family = 4;
+        }
+        if (!address) {
+            if (family === 4) {
+                address = "127.0.0.1";
+            } else if (family === 6) {
+                address = "::1";
+            }
+        }
+        return [port, address, family, id].join(",");
+    }
     autoClear({ ttl, interval } = autoClearDefaultOptions) {
         this.stopClear();
         this._intervalId = setInterval(() => {
@@ -53,9 +73,6 @@ class Session {
 }
 
 class SendingSession extends Session {
-    _convertToId(id, rinfo) {
-        return [rinfo.port, rinfo.address, rinfo.family, id].join(",");
-    }
     has(id, rinfo) {
         const key = this._convertToId(id, rinfo);
         return this._super.has(key);
@@ -85,7 +102,7 @@ class SendingSession extends Session {
         if (!this._ids) {
             this._ids = new Map();
         }
-        const key = this._convertToId(rinfo, 0);
+        const key = this._convertToId("", rinfo);
         const prevId = this._ids.has(key) ? this._ids.get(key) : -1;
         let id = prevId + 1;
         if (id >= this._maxCounter) {
@@ -106,26 +123,6 @@ class SendingSession extends Session {
 }
 
 class ReceivingSession extends Session {
-    _convertToId(id, { port, address, family }) {
-        if (family) {
-            let str = String(family).toLowerCase();
-            if (str.toLowerCase() === "ipv6" || str === "6") {
-                family = 6;
-            } else {
-                family = 4;
-            }
-        } else {
-            family = 4;
-        }
-        if (!address) {
-            if (family === 4) {
-                address = "127.0.0.1";
-            } else if (family === 6) {
-                address = "::1";
-            }
-        }
-        return [port, address, family, id].join(",");
-    }
     has(id, rinfo) {
         const key = this._convertToId(id, rinfo);
         return this._super.has(key);
