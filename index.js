@@ -3,16 +3,20 @@
 const net = require("net");
 const dgram = require("dgram");
 const EventEmitter = require("events");
-const debuglog = require("util").debuglog("reudp");
+const debuglog = (
+    debuglog => (...args) => debuglog(
+        new Date().toISOString().replace(/^[^T]+T([^Z]+)Z$/i, "$1"), ...args
+    )
+)(require("util").debuglog("reudp"));
 const utils = require("./libs/utils.js");
 
 const { SendingSession, ReceivingSession } = require("./libs/sessions.js");
 
 const MAX_COUNTER = Math.pow(2, 32);
-const MAX_PACKAGE_SIZE = 1024;
-const MAX_BUFFER_SIZE = Math.pow(2, 15) * MAX_PACKAGE_SIZE;
-const PARALLEL_COUNT = 16;
-const LATENCY = 150; /* ms */
+const MAX_PACKET_SIZE = 1090 - 14;
+const MAX_BUFFER_SIZE = Math.pow(2, 15) * MAX_PACKET_SIZE;
+const PARALLEL_COUNT = 92;
+const LATENCY = 20; /* ms */
 
 const UDP_PSH = Symbol("reudp-push-data");
 const UDP_REQ = Symbol("reudp-request-data");
@@ -82,17 +86,17 @@ class ReUDP extends EventEmitter {
         };
 
         this._receive = this._receive.bind(this);
-        this._handlePshPackage = this._handlePshPackage.bind(this);
-        this._handleReqPackage = this._handleReqPackage.bind(this);
-        this._handleFinPackage = this._handleFinPackage.bind(this);
-        this._handleAckPackage = this._handleAckPackage.bind(this);
-        this._handleErrPackage = this._handleErrPackage.bind(this);
+        this._handlePshPacket = this._handlePshPacket.bind(this);
+        this._handleReqPacket = this._handleReqPacket.bind(this);
+        this._handleFinPacket = this._handleFinPacket.bind(this);
+        this._handleAckPacket = this._handleAckPacket.bind(this);
+        this._handleErrPacket = this._handleErrPacket.bind(this);
 
-        this.addListener(this._events[UDP_PSH], this._handlePshPackage);
-        this.addListener(this._events[UDP_REQ], this._handleReqPackage);
-        this.addListener(this._events[UDP_FIN], this._handleFinPackage);
-        this.addListener(this._events[UDP_ACK], this._handleAckPackage);
-        this.addListener(this._events[UDP_ERR], this._handleErrPackage);
+        this.addListener(this._events[UDP_PSH], this._handlePshPacket);
+        this.addListener(this._events[UDP_REQ], this._handleReqPacket);
+        this.addListener(this._events[UDP_FIN], this._handleFinPacket);
+        this.addListener(this._events[UDP_ACK], this._handleAckPacket);
+        this.addListener(this._events[UDP_ERR], this._handleErrPacket);
 
         const socket = this._getSocketBy(options);
         socket.on("message", this._receive);
@@ -111,6 +115,10 @@ class ReUDP extends EventEmitter {
             onBeforeDestroy(key, val) {
                 if (val._delayTimerId) {
                     clearTimeout(val._delayTimerId);
+                }
+                if (val._intervalId) {
+                    clearInterval(val._intervalId);
+                    val._responsePacketReceived();
                 }
             },
         });
@@ -136,7 +144,7 @@ class ReUDP extends EventEmitter {
                     } else {
                         item[4] += 1;
                     }
-                    this._sendFinPackage(item[0], {
+                    this._sendFinPacket(item[0], {
                         port: item[1],
                         address: item[2],
                         family: item[3],
@@ -146,6 +154,16 @@ class ReUDP extends EventEmitter {
         }, 1000);
 
         this._drains = new WeakMap();
+        this._dataQueues = [];
+        const bandWidth = (options.bandWidth || 4) * 1024 * 1024 / 8; /* byte, default 4MiB */
+        this._RTT = (options.RTT || 200) + LATENCY; /* ms, default 200ms */
+        const parallelSize = MAX_PACKET_SIZE * this._parallelCount;
+        this._interval = (1000 * parallelSize) / (bandWidth - parallelSize);
+        if (this._interval < 0 || isNaN(this._interval)) {
+            this._interval = 1000;
+        }
+        this._frequency = Math.floor(this._RTT / this._interval) || 1;
+        debuglog(`@constructor():: interval:${this._interval}, frequency:${this._frequency}`);
     }
 
     /**
@@ -227,10 +245,12 @@ class ReUDP extends EventEmitter {
         delete buffers.__duplicateCounts__;
         delete buffers.__total__;
 
-        this._sendFinPackage(id, rinfo);
+        this._sendFinPacket(id, rinfo);
         this._finishNotifyQueue.add([id, port, address, family]);
 
-        this.emit("message", buffer, rinfo, id);
+        process.nextTick(() => {
+            this.emit("message", buffer, rinfo, id);
+        });
     }
 
     /**
@@ -254,7 +274,7 @@ class ReUDP extends EventEmitter {
     _request(buffers, { id, singleTotal, total }, rinfo) {
         const holes = this._getHolesFrom(buffers, singleTotal, total);
         debuglog(`@_request():: id:${id}, singleTotal:${singleTotal}, total:${total}, holes:${holes}`);
-        this._sendReqPackage(id, holes, rinfo);
+        this._sendReqPacket(id, holes, rinfo);
     }
 
     /**
@@ -263,12 +283,12 @@ class ReUDP extends EventEmitter {
      * @param {Object} info
      * @param {Address} rinfo
      */
-    _delayResponsePshPackage(buffers, info, rinfo) {
+    _delayResponsePshPacket(buffers, info, rinfo, delay) {
         if (buffers._delayTimerId) clearTimeout(buffers._delayTimerId);
         buffers._delayTimerId = setTimeout(() => {
-            this._responsePshPackage(buffers, info, rinfo);
+            this._responsePshPacket(buffers, info, rinfo);
             buffers._retryCount += 1;
-        }, LATENCY);
+        }, delay);
     }
 
     /**
@@ -277,16 +297,16 @@ class ReUDP extends EventEmitter {
      * @param {Object} info
      * @param {Address} rinfo
      */
-    _responsePshPackage(buffers, info, rinfo) {
+    _responsePshPacket(buffers, info, rinfo) {
         const { id, total } = info;
-        debuglog(`@_responsePshPackage():: id:${id}`);
+        debuglog(`@_responsePshPacket():: id:${id}`);
         if (this._checkBuffersFull(buffers, total)) {
             this._finish(id, buffers, rinfo);
         } else if (buffers._retryCount > RETRY_REQUEST_COUNT) {
             this._notifyReqTimeout(id, rinfo);
         } else {
             this._request(buffers, info, rinfo);
-            this._delayResponsePshPackage(buffers, info, rinfo);
+            this._delayResponsePshPacket(buffers, info, rinfo, this._interval);
         }
     }
 
@@ -300,18 +320,18 @@ class ReUDP extends EventEmitter {
      * @property {Buffer} info.data
      * @param {Address} rinfo
      */
-    _handlePshPackage({ id, seq, singleTotal, total, data }, rinfo) {
-        debuglog(`@_handlePshPackage():: id:${id}, seq:${seq}, singleTotal: ${singleTotal}, total:${total}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
+    _handlePshPacket({ id, seq, singleTotal, total, data }, rinfo) {
+        debuglog(`@_handlePshPacket():: id:${id}, seq:${seq}, singleTotal: ${singleTotal}, total:${total}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
         const buffers = this._receivingSession.get(id, rinfo);
-        // drop the package
+        // drop the packet
         if (!buffers) {
-            debuglog(`@_handlePshPackage:: Error: can not get receiving session from id:${id}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
+            debuglog(`@_handlePshPacket:: Error: can not get receiving session from id:${id}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
             return;
         }
 
         buffers._retryCount = 0;
 
-        // duplicate package
+        // duplicate packet
         if (Buffer.isBuffer(buffers[seq])) {
             if (!buffers._used) {
                 buffers.__duplicateCounts__ = (buffers.__duplicateCounts__ || 0) + 1;
@@ -322,7 +342,7 @@ class ReUDP extends EventEmitter {
 
         buffers[seq] = data;
 
-        this._delayResponsePshPackage(buffers, { id, singleTotal, total }, rinfo);
+        this._delayResponsePshPacket(buffers, { id, singleTotal, total }, rinfo,  LATENCY);
     }
 
     /**
@@ -332,16 +352,17 @@ class ReUDP extends EventEmitter {
      * @property {number[]} info.sequences
      * @param {Address} rinfo
      */
-    _handleReqPackage({ id, sequences }, rinfo) {
-        debuglog(`@_handleReqPackage():: id:${id}, sequences:${sequences}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
+    _handleReqPacket({ id, sequences }, rinfo) {
+        debuglog(`@_handleReqPacket():: id:${id}, sequences:${sequences}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
         const session = this._sendingSession.get(id, rinfo);
         if (!session) {
-            this._sendErrPackage(id, ERR_NOT_FOUND_ID, rinfo);
+            this._sendErrPacket(id, ERR_NOT_FOUND_ID, rinfo);
             return;
         }
-        const packagesGenerator = session;
+        const packetsGenerator = session;
+        packetsGenerator._responsePacketReceived();
         process.nextTick(() => {
-            this._trySend(id, rinfo, packagesGenerator, sequences);
+            this._trySend(id, rinfo, packetsGenerator, sequences);
         });
     }
 
@@ -351,12 +372,13 @@ class ReUDP extends EventEmitter {
      * @property {number} info.id
      * @param {Address} rinfo
      */
-    _handleFinPackage({ id }, rinfo) {
-        debuglog(`@_handleFinPackage():: id:${id}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
+    _handleFinPacket({ id }, rinfo) {
+        debuglog(`@_handleFinPacket():: id:${id}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
         const session = this._sendingSession.get(id, rinfo);
         if (session) {
-            const packagesGenerator = session;
-            const { value: val } = packagesGenerator.next(null); // exit
+            const packetsGenerator = session;
+            packetsGenerator._responsePacketReceived();
+            const { value: val } = packetsGenerator.next(null); // exit
             if (val) {
                 debuglog("source,", JSON.stringify({
                     id,
@@ -364,17 +386,17 @@ class ReUDP extends EventEmitter {
                     repeatRate: val,
                 }));
             }
-            const onDrain = this._drains.get(packagesGenerator);
+            const onDrain = this._drains.get(packetsGenerator);
             if (onDrain) {
                 process.nextTick(() => {
                     onDrain(id, rinfo);
                 });
-                this._drains.delete(packagesGenerator);
+                this._drains.delete(packetsGenerator);
             }
             this.emit("drain", id, rinfo);
             this._sendingSession.delete(id, rinfo);
         }
-        this._sendAckPackage(id, UDP_FIN, rinfo);
+        this._sendAckPacket(id, UDP_FIN, rinfo);
     }
 
     /**
@@ -384,8 +406,8 @@ class ReUDP extends EventEmitter {
      * @property {symbol} info.ackType
      * @param {Address} rinfo
      */
-    _handleAckPackage({ id, ackType }, rinfo) {
-        debuglog(`@_handleAckPackage():: id:${id}, ackType:${ackType.toString()}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
+    _handleAckPacket({ id, ackType }, rinfo) {
+        debuglog(`@_handleAckPacket():: id:${id}, ackType:${ackType.toString()}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
         switch (ackType) {
             case UDP_FIN:
                 {
@@ -410,8 +432,8 @@ class ReUDP extends EventEmitter {
      * @property {symbol} info.errType
      * @param {Address} rinfo
      */
-    _handleErrPackage({ id, errType }, rinfo) {
-        debuglog(`@_handleAckPackage():: id:${id}, errType:${errType.toString()}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
+    _handleErrPacket({ id, errType }, rinfo) {
+        debuglog(`@_handleAckPacket():: id:${id}, errType:${errType.toString()}, port:${rinfo.port}, address:${rinfo.address}, family:${rinfo.family}`);
         switch (errType) {
             case ERR_NOT_FOUND_ID:
                 this._receivingSession.delete(id, rinfo);
@@ -445,7 +467,7 @@ class ReUDP extends EventEmitter {
      * @property {number} info.total
      * @property {buffer} info.data
      */
-    _parsePshPackage(buffer, cursor) {
+    _parsePshPacket(buffer, cursor) {
         const seq = buffer.readUInt16BE(cursor);
         cursor += 2;
 
@@ -466,7 +488,7 @@ class ReUDP extends EventEmitter {
      * @param {number} cursor
      * @return {{sequences: number[]}}
      */
-    _parseReqPackage(buffer, cursor) {
+    _parseReqPacket(buffer, cursor) {
         const sequences = [];
         for (let i = cursor, len = buffer.length; i < len; i += 2) {
             sequences.push(buffer.readUInt16BE(i));
@@ -480,7 +502,7 @@ class ReUDP extends EventEmitter {
      * @param {number} cursor
      * @return {{ackType: symbol}}
      */
-    _parseAckPackage(buffer, cursor) {
+    _parseAckPacket(buffer, cursor) {
         const ackTypeCode = buffer.readUInt8(cursor);
         return ({
             ackType: UDP_CODE_TYPES.get(ackTypeCode),
@@ -493,7 +515,7 @@ class ReUDP extends EventEmitter {
      * @param {number} cursor
      * @return {{errType: symbol}}
      */
-    _parseErrPackage(buffer, cursor) {
+    _parseErrPacket(buffer, cursor) {
         const errTypeCode = buffer.readUInt16BE(cursor);
         return ({
             errType: errTypeCode,
@@ -511,24 +533,24 @@ class ReUDP extends EventEmitter {
         switch (header.type) {
             case UDP_PSH:
                 return Object.assign({},
-                    this._parsePshPackage(buffer, cursor),
+                    this._parsePshPacket(buffer, cursor),
                     header
                 );
             case UDP_REQ:
                 return Object.assign({},
-                    this._parseReqPackage(buffer, cursor),
+                    this._parseReqPacket(buffer, cursor),
                     header
                 );
             case UDP_FIN:
                 return header;
             case UDP_ACK:
                 return Object.assign({},
-                    this._parseAckPackage(buffer, cursor),
+                    this._parseAckPacket(buffer, cursor),
                     header
                 );
             case UDP_ERR:
                 return Object.assign({},
-                    this._parseErrPackage(buffer, cursor),
+                    this._parseErrPacket(buffer, cursor),
                     header
                 );
             default:
@@ -562,7 +584,7 @@ class ReUDP extends EventEmitter {
      * @param {number[]} holes
      * @param {Address} rinfo
      */
-    _sendReqPackage(id, holes, rinfo) {
+    _sendReqPacket(id, holes, rinfo) {
         let len = 0;
         const header = this._packHeader(UDP_REQ, id);
         len += header.length;
@@ -583,7 +605,7 @@ class ReUDP extends EventEmitter {
      * @param {symbol} type
      * @param {Address} rinfo
      */
-    _sendAckPackage(id, type, rinfo) {
+    _sendAckPacket(id, type, rinfo) {
         let len = 0;
         const header = this._packHeader(UDP_ACK, id);
         len += header.length;
@@ -600,7 +622,7 @@ class ReUDP extends EventEmitter {
      * @param {number} id
      * @param {Address} rinfo
      */
-    _sendFinPackage(id, rinfo) {
+    _sendFinPacket(id, rinfo) {
         const header = this._packHeader(UDP_FIN, id);
         this._send(header, rinfo);
     }
@@ -611,7 +633,7 @@ class ReUDP extends EventEmitter {
      * @param {symbol} errType
      * @param {Address}
      */
-    _sendErrPackage(id, errType, rinfo) {
+    _sendErrPacket(id, errType, rinfo) {
         let len = 0;
         const header = this._packHeader(UDP_ERR, id);
         len += header.length;
@@ -691,14 +713,15 @@ class ReUDP extends EventEmitter {
      * @param {number} id
      * @param {Buffer} buffer
      */
-    *_generatePackagesBy(id, buffer) {
-        const totalCount = Math.ceil(buffer.length / MAX_PACKAGE_SIZE);
+    *_generatePacketsBy(id, buffer) {
+        const totalCount = Math.ceil(buffer.length / MAX_PACKET_SIZE);
         const parallelCount = Math.min(this._parallelCount, totalCount);
         const length = buffer.length;
-        debuglog(`@_generatePackagesBy():: id:${id}, parallelCount:${parallelCount}, totalCount:${totalCount}`);
+        debuglog(`@_generatePacketsBy():: id:${id}, parallelCount:${parallelCount}, totalCount:${totalCount}`);
 
+        const firstParallelCount = Math.min(parallelCount * this._frequency, totalCount);
         let req = utils.unzipSequences(
-            [0x8000, 0x8000 | (parallelCount - 1)]
+            [0x8000, 0x8000 | (firstParallelCount - 1)]
         );
 
         let counts = 0;
@@ -706,8 +729,8 @@ class ReUDP extends EventEmitter {
         while (req && req.length > 0) {
             let parallels = req.map(seq => {
                 counts += 1;
-                const start = seq * MAX_PACKAGE_SIZE;
-                const end = Math.min(start + MAX_PACKAGE_SIZE, length);
+                const start = seq * MAX_PACKET_SIZE;
+                const end = Math.min(start + MAX_PACKET_SIZE, length);
                 const buf = buffer.slice(start, end);
                 return this._packData(id, seq, parallelCount, totalCount, buf);
             });
@@ -715,6 +738,60 @@ class ReUDP extends EventEmitter {
         }
 
         return counts / totalCount;
+    }
+
+    _sendPshNotResponse(id, rinfo) {
+        this._sendingSession.delete(id, rinfo);
+        this.emit("timeout", id, rinfo);
+    }
+
+    /**
+     * @private
+     * @param {number} id
+     * @param {Buffer} buffer
+     * @return {Generator}
+     */
+    _createPacketGenerator(id, buffer) {
+        const gen = this._generatePacketsBy(id, buffer);
+        const _queues = gen._queues = [];
+        gen._intervalId = setInterval(() => {
+            if (!_queues.length) return;
+            let [packets, rinfo] = _queues.shift();
+            if (packets.length > this._parallelCount) {
+                debuglog("what the fuck!");
+                const remaining = packets.slice(this._parallelCount);
+                packets = packets.slice(0, this._parallelCount);
+                _queues.unshift([remaining, rinfo]);
+            }
+            for (const pkt of packets) {
+                this._send(pkt, rinfo);
+            }
+            debuglog(`@interval, remaining:${_queues.length}`);
+            // retry first packets
+            if (!gen.hasOwnProperty("_retrySendingPackets")) {
+                let count = -1;
+                let _ = () => {
+                    count += 1;
+                    if (count < 3) {
+                        debuglog(`@interval, retry:${count + 1}`);
+                        _queues.unshift([packets, rinfo]);
+                        gen._retrySendingPackets = setTimeout(_, this._RTT + 2000);
+                    } else {
+                        this._sendPshNotResponse(id, rinfo);
+                    }
+                };
+                gen._retrySendingPackets = setTimeout(_, this._RTT + 1000);
+                gen._responsePacketReceived = function () {
+                    debuglog("response packet received!");
+                    gen._responsePacketReceived = Function();
+                    if (gen._retrySendingPackets) {
+                        clearTimeout(gen._retrySendingPackets);
+                        gen._retrySendingPackets = null;
+                    }
+                };
+            }
+        }, this._interval);
+        return gen;
     }
 
     /**
@@ -733,42 +810,40 @@ class ReUDP extends EventEmitter {
      * @private
      * @param {number} id
      * @param {Address} rinfo
-     * @param {Object<Generator>} packagesGenerator
+     * @param {Object<Generator>} packetsGenerator
      * @param {number[]} requestSequences
      */
-    _trySend(id, rinfo, packagesGenerator, requestSequences) {
+    _trySend(id, rinfo, packetsGenerator, requestSequences) {
         debuglog(`@_trySend:: id:${id}, requestSequences:${requestSequences}`);
-        if (packagesGenerator._delayTimerId) clearTimeout(packagesGenerator._delayTimerId);
+        if (packetsGenerator._delayTimerId) clearTimeout(packetsGenerator._delayTimerId);
         if (requestSequences) {
-            if (packagesGenerator._lastRequestSequences && packagesGenerator._lastRequestSequences.length) {
+            if (packetsGenerator._lastRequestSequences && packetsGenerator._lastRequestSequences.length) {
                 requestSequences = this._diffRequestSequences(
                     requestSequences,
-                    packagesGenerator._lastRequestSequences
+                    packetsGenerator._lastRequestSequences
                 );
             }
             if (requestSequences.length === 0) {
-                delete packagesGenerator._lastRequestSequences;
+                delete packetsGenerator._lastRequestSequences;
                 return;
             }
         }
-        const { done, value: packages } = packagesGenerator.next(requestSequences);
+        const { done, value: packets } = packetsGenerator.next(requestSequences);
         if (done) {
-            if (packages) {
+            if (packets) {
                 debuglog("source,", JSON.stringify({
                     id,
                     rinfo,
-                    repeatRate: packages,
+                    repeatRate: packets,
                 }));
             }
             return;
         }
-        for (const pkg of packages) {
-            this._send(pkg, rinfo);
-        }
-        packagesGenerator._lastRequestSequences = requestSequences;
-        packagesGenerator._delayTimerId = setTimeout(() => {
-            delete packagesGenerator._lastRequestSequences;
-        }, LATENCY);
+        packetsGenerator._queues.push([packets, rinfo]);
+        packetsGenerator._lastRequestSequences = requestSequences;
+        packetsGenerator._delayTimerId = setTimeout(() => {
+            delete packetsGenerator._lastRequestSequences;
+        }, this._interval);
     }
 
     /**
@@ -778,14 +853,16 @@ class ReUDP extends EventEmitter {
      * @param {Address} rinfo
      * @param {Function} [onDrain]
      */
-    _sendPshPackage(buffer, id, rinfo, onDrain) {
-        const packagesGenerator = this._generatePackagesBy(id, buffer);
-        this._sendingSession.set(id, rinfo, packagesGenerator);
+    _sendPshPacket(buffer, id, rinfo, onDrain) {
+        const packetsGenerator = this._createPacketGenerator(id, buffer);
+        this._sendingSession.set(id, rinfo, packetsGenerator);
+
         if (typeof onDrain === "function") {
-            this._drains.set(packagesGenerator, onDrain);
+            this._drains.set(packetsGenerator, onDrain);
         }
+
         process.nextTick(() => {
-            this._trySend(id, rinfo, packagesGenerator);
+            this._trySend(id, rinfo, packetsGenerator);
         });
     }
 
@@ -820,7 +897,7 @@ class ReUDP extends EventEmitter {
             throw new RangeError(`buffer must be bwtween 0 and ${MAX_BUFFER_SIZE}`);
         }
         const id = this._sendingSession.getIdBy(rinfo);
-        this._sendPshPackage(buffer, id, rinfo, onDrain);
+        this._sendPshPacket(buffer, id, rinfo, onDrain);
         return id;
     }
 
@@ -835,11 +912,11 @@ class ReUDP extends EventEmitter {
         clearInterval(this._fnqId);
         delete this._fnqId;
 
-        this.removeListener(this._events[UDP_PSH], this._handlePshPackage);
-        this.removeListener(this._events[UDP_REQ], this._handleReqPackage);
-        this.removeListener(this._events[UDP_FIN], this._handleFinPackage);
-        this.removeListener(this._events[UDP_ACK], this._handleAckPackage);
-        this.removeListener(this._events[UDP_ERR], this._handleErrPackage);
+        this.removeListener(this._events[UDP_PSH], this._handlePshPacket);
+        this.removeListener(this._events[UDP_REQ], this._handleReqPacket);
+        this.removeListener(this._events[UDP_FIN], this._handleFinPacket);
+        this.removeListener(this._events[UDP_ACK], this._handleAckPacket);
+        this.removeListener(this._events[UDP_ERR], this._handleErrPacket);
 
         this._sendingSession.clear();
         this._receivingSession.clear();
