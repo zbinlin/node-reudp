@@ -1,6 +1,6 @@
 {
   "name": "reudp",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "description": "Reliable UDP implementation for Node",
   "main": "index.js",
   "scripts": {
