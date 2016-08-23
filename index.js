@@ -42,7 +42,7 @@ const MAX_COUNTER = Math.pow(2, 32);
 const MAX_PACKET_SIZE = 1090 - 14;
 const MAX_BUFFER_SIZE = Math.pow(2, 15) * MAX_PACKET_SIZE;
 const PARALLEL_COUNT = 92;
-const LATENCY = 20; /* ms */
+const LATENCY = 35; /* ms */
 
 const UDP_PSH = Symbol("reudp-push-data");
 const UDP_REQ = Symbol("reudp-request-data");
@@ -144,7 +144,7 @@ class ReUDP extends EventEmitter {
                 }
                 if (val._intervalId) {
                     clearInterval(val._intervalId);
-                    val._responsePacketReceived();
+                    val._clearRetrySendingTimer();
                 }
             },
         });
@@ -266,7 +266,7 @@ class ReUDP extends EventEmitter {
         debuglog(`duplicate: dest, ${JSON.stringify({
             id,
             rinfo,
-            duplicateRate: buffers.__duplicateCounts__ / (buffers.__total__ + buffers.__duplicateCounts__),
+            duplicateRate: (buffers.__duplicateCounts__ + buffers.__total__) / buffers.__total__,
         })}`);
         delete buffers.__duplicateCounts__;
         delete buffers.__total__;
@@ -332,7 +332,7 @@ class ReUDP extends EventEmitter {
             this._notifyReqTimeout(id, rinfo);
         } else {
             this._request(buffers, info, rinfo);
-            this._delayResponsePshPacket(buffers, info, rinfo, this._interval);
+            this._delayResponsePshPacket(buffers, info, rinfo, this._RTT);
         }
     }
 
@@ -386,9 +386,9 @@ class ReUDP extends EventEmitter {
             return;
         }
         const packetsGenerator = session;
-        packetsGenerator._responsePacketReceived();
+        packetsGenerator._clearRetrySendingTimer(true);
         process.nextTick(() => {
-            this._trySend(id, rinfo, packetsGenerator, sequences);
+            this._trySend(packetsGenerator, sequences);
         });
     }
 
@@ -403,7 +403,7 @@ class ReUDP extends EventEmitter {
         const session = this._sendingSession.get(id, rinfo);
         if (session) {
             const packetsGenerator = session;
-            packetsGenerator._responsePacketReceived();
+            packetsGenerator._clearRetrySendingTimer(true);
             const { value: val } = packetsGenerator.next(null); // exit
             if (val) {
                 debuglog("source,", JSON.stringify({
@@ -758,7 +758,7 @@ class ReUDP extends EventEmitter {
                 const start = seq * MAX_PACKET_SIZE;
                 const end = Math.min(start + MAX_PACKET_SIZE, length);
                 const buf = buffer.slice(start, end);
-                return this._packData(id, seq, parallelCount, totalCount, buf);
+                return [seq, this._packData(id, seq, parallelCount, totalCount, buf)];
             });
             req = yield parallels;
         }
@@ -774,47 +774,58 @@ class ReUDP extends EventEmitter {
     /**
      * @private
      * @param {number} id
+     * @param {Address} rinfo
      * @param {Buffer} buffer
      * @return {Generator}
      */
-    _createPacketGenerator(id, buffer) {
+    _createPacketGenerator(id, rinfo, buffer) {
         const gen = this._generatePacketsBy(id, buffer);
-        const _queues = gen._queues = [];
+        gen._id = id;
+        gen._rinfo = Object.assign({}, rinfo);
+        const _queues = gen._queues = new Map();
         gen._intervalId = setInterval(() => {
-            if (!_queues.length) return;
-            let [packets, rinfo] = _queues.shift();
-            if (packets.length > this._parallelCount) {
-                debuglog("what the fuck!");
-                const remaining = packets.slice(this._parallelCount);
-                packets = packets.slice(0, this._parallelCount);
-                _queues.unshift([remaining, rinfo]);
+            if (_queues.size === 0) return;
+            const maxSize = this._parallelCount;
+            let i = 0;
+            const retryPackets = [];
+            for (const [seq, pkt] of _queues) {
+                if (i >= maxSize) break;
+                this._send(pkt, gen._rinfo);
+                _queues.delete(seq);
+                retryPackets.push(pkt);
+                i++;
             }
-            for (const pkt of packets) {
-                this._send(pkt, rinfo);
-            }
-            debuglog(`@interval, remaining:${_queues.length}`);
+            debuglog(`@interval, remaining:${_queues.size}`);
             // retry first packets
-            if (!gen.hasOwnProperty("_retrySendingPackets")) {
+            if (!gen.hasOwnProperty("_clearRetrySendingTimer")) {
                 let count = -1;
+                let delay = this._RTT + 1000;
                 let _ = () => {
                     count += 1;
+                    delay *= 1.8;
                     if (count < 3) {
-                        debuglog(`@interval, retry:${count + 1}`);
-                        _queues.unshift([packets, rinfo]);
-                        gen._retrySendingPackets = setTimeout(_, this._RTT + 2000);
+                        debuglog(`@interval, retry:${count + 1}, next time:${delay}ms`);
+                        if (_queues.size === 0) {
+                            for (const pkt of retryPackets) {
+                                this._send(pkt, gen._rinfo);
+                            }
+                        }
+                        gen._retrySendingTimer = setTimeout(_, delay);
                     } else {
-                        this._sendPshNotResponse(id, rinfo);
+                        this._sendPshNotResponse(id, gen._rinfo);
                     }
                 };
-                gen._retrySendingPackets = setTimeout(_, this._RTT + 1000);
-                gen._responsePacketReceived = function () {
-                    debuglog("response packet received!");
-                    gen._responsePacketReceived = Function();
-                    if (gen._retrySendingPackets) {
-                        clearTimeout(gen._retrySendingPackets);
-                        gen._retrySendingPackets = null;
+                gen._retrySendingTimer = setTimeout(_, delay);
+                gen._clearRetrySendingTimer = function (received) {
+                    debuglog(`@_clearRetrySendingTimer:: ${received ? "packets sended success!" : "packets not response!"}`);
+                    gen._clearRetrySendingTimer = Function();
+                    if (gen._retrySendingTimer) {
+                        clearTimeout(gen._retrySendingTimer);
+                        delete gen._retrySendingTimer;
                     }
                 };
+            } else {
+                retryPackets.length = 0;
             }
         }, this._interval);
         return gen;
@@ -834,13 +845,11 @@ class ReUDP extends EventEmitter {
 
     /**
      * @private
-     * @param {number} id
-     * @param {Address} rinfo
      * @param {Object<Generator>} packetsGenerator
      * @param {number[]} requestSequences
      */
-    _trySend(id, rinfo, packetsGenerator, requestSequences) {
-        debuglog(`@_trySend:: id:${id}, requestSequences:${requestSequences}`);
+    _trySend(packetsGenerator, requestSequences) {
+        debuglog(`@_trySend:: id:${packetsGenerator._id}, requestSequences:${requestSequences}`);
         if (packetsGenerator._delayTimerId) clearTimeout(packetsGenerator._delayTimerId);
         if (requestSequences) {
             if (packetsGenerator._lastRequestSequences && packetsGenerator._lastRequestSequences.length) {
@@ -858,18 +867,22 @@ class ReUDP extends EventEmitter {
         if (done) {
             if (packets) {
                 debuglog("source,", JSON.stringify({
-                    id,
-                    rinfo,
+                    id: packetsGenerator._id,
+                    rinfo: packetsGenerator._rinfo,
                     repeatRate: packets,
                 }));
             }
             return;
         }
-        packetsGenerator._queues.push([packets, rinfo]);
+        for (const [key, val] of packets) {
+            if (!packetsGenerator._queues.has(key)) {
+                packetsGenerator._queues.set(key, val);
+            }
+        }
         packetsGenerator._lastRequestSequences = requestSequences;
         packetsGenerator._delayTimerId = setTimeout(() => {
             delete packetsGenerator._lastRequestSequences;
-        }, this._interval);
+        }, this._RTT);
     }
 
     /**
@@ -880,7 +893,7 @@ class ReUDP extends EventEmitter {
      * @param {Function} [onDrain]
      */
     _sendPshPacket(buffer, id, rinfo, onDrain) {
-        const packetsGenerator = this._createPacketGenerator(id, buffer);
+        const packetsGenerator = this._createPacketGenerator(id, rinfo, buffer);
         this._sendingSession.set(id, rinfo, packetsGenerator);
 
         if (typeof onDrain === "function") {
@@ -888,7 +901,7 @@ class ReUDP extends EventEmitter {
         }
 
         process.nextTick(() => {
-            this._trySend(id, rinfo, packetsGenerator);
+            this._trySend(packetsGenerator);
         });
     }
 
