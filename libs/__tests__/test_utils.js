@@ -126,3 +126,38 @@ describe("test xor function", function () {
         }).to.be.throw(TypeError);
     });
 });
+
+
+describe("test bisect function", function () {
+    it("returns an index of array", function () {
+        expect(utils.bisect([], 1)).to.be.equal(0);
+
+        expect(utils.bisect([0], 0)).to.be.equal(0);
+        expect(utils.bisect([0], 1)).to.be.equal(1);
+        expect(utils.bisect([0], 2)).to.be.equal(1);
+
+        expect(utils.bisect([0, 2], 1)).to.be.equal(1);
+        expect(utils.bisect([0, 2], 2)).to.be.equal(1);
+        expect(utils.bisect([0, 2], 4)).to.be.equal(2);
+
+        expect(utils.bisect([0, 2, 6], 4)).to.be.equal(2);
+        expect(utils.bisect([0, 2, 6], 8)).to.be.equal(3);
+    });
+});
+
+describe("test insert function", function () {
+    it("returns an array that inserted a value", function () {
+        expect(utils.insert([], 1)).to.be.eql([1]);
+
+        expect(utils.insert([0], 0)).to.be.eql([0]);
+        expect(utils.insert([0], 1)).to.be.eql([0, 1]);
+        expect(utils.insert([0], 2)).to.be.eql([0, 2]);
+
+        expect(utils.insert([0, 2], 1)).to.be.eql([0, 1, 2]);
+        expect(utils.insert([0, 2], 2)).to.be.eql([0, 2]);
+        expect(utils.insert([0, 2], 4)).to.be.eql([0, 2, 4]);
+
+        expect(utils.insert([0, 2, 6], 4)).to.be.eql([0, 2, 4, 6]);
+        expect(utils.insert([0, 2, 6], 8)).to.be.eql([0, 2, 6, 8]);
+    });
+});

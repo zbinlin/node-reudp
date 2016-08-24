@@ -88,7 +88,7 @@ utils.unzipSequences = function unzipSequences(ary) {
             unzippedAry.push(curr);
         }
     }
-    return unique(unzippedAry);
+    return unique(unzippedAry).sort(asc);
 };
 
 
@@ -159,4 +159,31 @@ utils.debuglog = function debuglog(set) {
     return (...args) => log(
         new Date().toISOString().replace(/^[^T]+T([^Z]+)Z$/i, "$1"), ...args
     );
+};
+
+
+/**
+ * use binary search for a value in a sorted array
+ */
+utils.bisect = function bisect(ary, val, start = 0, end = ary.length) {
+    while (start < end) {
+        let mid = (start + end) >>> 1;
+        if (ary[mid] < val) {
+            start = mid + 1;
+        } else {
+            end = mid;
+        }
+    }
+    return start;
+};
+
+/**
+ * insert a value into a sorted array faster
+ */
+utils.insert = function insert(ary, val) {
+    let idx = utils.bisect(ary, val);
+    if (ary[idx] !== val) {
+        ary.splice(idx, 0, val);
+    }
+    return ary;
 };

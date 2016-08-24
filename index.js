@@ -12,7 +12,7 @@ const MAX_COUNTER = Math.pow(2, 32);
 const MAX_PACKET_SIZE = 1090 - 14;
 const MAX_BUFFER_SIZE = Math.pow(2, 15) * MAX_PACKET_SIZE;
 const PARALLEL_COUNT = 92;
-const LATENCY = 35; /* ms */
+const LATENCY = 15; /* ms */
 
 const UDP_PSH = Symbol("reudp-push-data");
 const UDP_REQ = Symbol("reudp-request-data");
@@ -52,7 +52,6 @@ const RETRY_REQUEST_COUNT = 10;
 class ReUDP extends EventEmitter {
     /**
      * @param {Object} [options={}]
-     * @property {number} [options.parallelCount]
      * @property {number} [options.remotePort]
      * @property {string} [options.remoteAddress]
      * @property {string} [options.remoteFamily]
@@ -63,7 +62,7 @@ class ReUDP extends EventEmitter {
      */
     constructor(options = {}) {
         super();
-        this._parallelCount = options.parallelCount || PARALLEL_COUNT;
+        this._parallelCount = PARALLEL_COUNT;
         if (options.remotePort) {
             this._remoteAddress = {
                 port: options.remotePort,
@@ -109,12 +108,12 @@ class ReUDP extends EventEmitter {
                 interval: 1000 * 30 /* 30s */,
             },
             onBeforeDestroy(key, val) {
-                if (val._delayTimerId) {
-                    clearTimeout(val._delayTimerId);
-                }
                 if (val._intervalId) {
                     clearInterval(val._intervalId);
                     val._clearRetrySendingTimer();
+                }
+                if (val._checkFreshTimer) {
+                    clearInterval(val._checkFreshTimer);
                 }
             },
         });
@@ -675,13 +674,13 @@ class ReUDP extends EventEmitter {
      * @private
      * @param {number} id
      * @param {number} seq
-     * @param {number} parallelCount
-     * @param {number} totalCount
+     * @param {number} singleTotal
+     * @param {number} total
      * @param {Buffer} buf
      * @return {Buffer}
      */
-    _packData(id, seq, parallelCount, totalCount, buf) {
-        debuglog(`@_packData():: id:${id}, seq:${seq}, parallelCount:${parallelCount}, totalCount:${totalCount}`);
+    _packData(id, seq, singleTotal, total, buf) {
+        debuglog(`@_packData():: id:${id}, seq:${seq}, singleTotal:${singleTotal}, total:${total}`);
         let len = buf.length;
 
         const header = this._packHeader(UDP_PSH, id);
@@ -692,11 +691,11 @@ class ReUDP extends EventEmitter {
         len += seqBuf.length;
 
         const parallelCountBuf = Buffer.alloc(2);
-        parallelCountBuf.writeUInt16BE(parallelCount);
+        parallelCountBuf.writeUInt16BE(singleTotal);
         len += parallelCountBuf.length;
 
         const totalCountBuf = Buffer.alloc(2);
-        totalCountBuf.writeUInt16BE(totalCount);
+        totalCountBuf.writeUInt16BE(total);
         len += totalCountBuf.length;
 
         return Buffer.concat([
@@ -709,13 +708,11 @@ class ReUDP extends EventEmitter {
      * @param {number} id
      * @param {Buffer} buffer
      */
-    *_generatePacketsBy(id, buffer) {
-        const totalCount = Math.ceil(buffer.length / MAX_PACKET_SIZE);
-        const parallelCount = Math.min(this._parallelCount, totalCount);
+    *_generatePacketsBy(id, buffer, singleTotal, total) {
         const length = buffer.length;
-        debuglog(`@_generatePacketsBy():: id:${id}, parallelCount:${parallelCount}, totalCount:${totalCount}`);
+        debuglog(`@_generatePacketsBy():: id:${id}, singleTotal:${singleTotal}, total:${total}`);
 
-        const firstParallelCount = Math.min(parallelCount * this._frequency, totalCount);
+        const firstParallelCount = Math.min(singleTotal * this._frequency, total);
         let req = utils.unzipSequences(
             [0x8000, 0x8000 | (firstParallelCount - 1)]
         );
@@ -728,12 +725,12 @@ class ReUDP extends EventEmitter {
                 const start = seq * MAX_PACKET_SIZE;
                 const end = Math.min(start + MAX_PACKET_SIZE, length);
                 const buf = buffer.slice(start, end);
-                return [seq, this._packData(id, seq, parallelCount, totalCount, buf)];
+                return [seq, this._packData(id, seq, singleTotal, total, buf)];
             });
             req = yield parallels;
         }
 
-        return counts / totalCount;
+        return counts / total;
     }
 
     _sendPshNotResponse(id, rinfo) {
@@ -749,20 +746,41 @@ class ReUDP extends EventEmitter {
      * @return {Generator}
      */
     _createPacketGenerator(id, rinfo, buffer) {
-        const gen = this._generatePacketsBy(id, buffer);
+        const total = Math.ceil(buffer.length / MAX_PACKET_SIZE);
+        const singleTotal = Math.min(this._parallelCount, total);
+        const gen = this._generatePacketsBy(id, buffer, singleTotal, total);
+
         gen._id = id;
         gen._rinfo = Object.assign({}, rinfo);
+        gen._total = total;
+        gen._singleTotal = singleTotal;
+
+        gen._recivedQueues = [];
+        gen._pendingQueues = new Map();
+        gen._remainingQueues = (() => {
+            let ary = [];
+            for (let i = 0; i < total; i++) {
+                ary[i] = i;
+            }
+            return ary;
+        })();
+        gen._checkFreshTimer = setInterval(
+            this._checkFresh,
+            LATENCY,
+            gen._pendingQueues, gen._remainingQueues, this._RTT
+        );
+
         const _queues = gen._queues = new Map();
         gen._intervalId = setInterval(() => {
             if (_queues.size === 0) return;
-            const maxSize = this._parallelCount;
             let i = 0;
             const retryPackets = [];
             for (const [seq, pkt] of _queues) {
-                if (i >= maxSize) break;
+                if (i >= singleTotal) break;
                 this._send(pkt, gen._rinfo);
                 _queues.delete(seq);
-                retryPackets.push(pkt);
+                retryPackets.push([seq, pkt]);
+                gen._pendingQueues.set(seq, Date.now());
                 i++;
             }
             debuglog(`@interval, remaining:${_queues.size}`);
@@ -776,8 +794,9 @@ class ReUDP extends EventEmitter {
                     if (count < 3) {
                         debuglog(`@interval, retry:${count + 1}, next time:${delay}ms`);
                         if (_queues.size === 0) {
-                            for (const pkt of retryPackets) {
+                            for (const [seq, pkt] of retryPackets) {
                                 this._send(pkt, gen._rinfo);
+                                gen._pendingQueues.set(seq, Date.now());
                             }
                         }
                         gen._retrySendingTimer = setTimeout(_, delay);
@@ -803,14 +822,64 @@ class ReUDP extends EventEmitter {
 
     /**
      * @private
-     * @param {number[]} a
-     * @param {number[]|Set<number>} b
+     * @param {Map<number, number>} pendingQueues
+     * @param {number[]} remainingQueues
+     * @param {number} [ttl=this._RTT]
      */
-    _diffRequestSequences(a, b) {
-        if (!(b instanceof Set)) {
-            b = new Set(b);
+    _checkFresh(pendingQueues, remainingQueues, TTL = this._RTT) {
+        const now = Date.now();
+        for (const [key, val] of pendingQueues) {
+            if (now - val > TTL) {
+                pendingQueues.delete(key);
+                utils.insert(remainingQueues, key);
+            }
         }
-        return a.filter(seq => !b.has(seq));
+    }
+
+    /**
+     * @private
+     * @param {number[]} req
+     * @param {number[]} recivedQueues
+     * @param {Map<number, number>} pendingQueues
+     * @param {number[]} remainingQueues
+     * @param {number} [max]
+     */
+    _diffRequestSequences(req, recivedQueues, pendingQueues, remainingQueues, max = this._parallelCount) {
+        const newReq = [];
+        if (req[0] > recivedQueues.length) {
+            for (let i = recivedQueues.length, len = req[0]; i < len; i++) {
+                recivedQueues[i] = true;
+            }
+        }
+        const reqSets = new Set(req);
+        for (let i = req[0], len = req[req.length - 1]; i <= len; i++) {
+            if (!recivedQueues[i] && !pendingQueues.has(i)) {
+                if (reqSets.has(i)) {
+                    const idx = remainingQueues.indexOf(i);
+                    if (idx === -1) {
+                        debuglog(`@_diffRequestSequences, request unkown seq:${i}`);
+                    } else {
+                        newReq.push(i);
+                        remainingQueues.splice(idx, 1);
+                    }
+                } else {
+                    recivedQueues[i] = true;
+                }
+            }
+            if (pendingQueues.has(i) && recivedQueues[i]) {
+                pendingQueues.delete(i);
+            }
+        }
+        if (newReq.length < max && remainingQueues.length > 0) {
+            const len = Math.min(max - newReq.length, remainingQueues.length);
+            let count = 0;
+            while (count < len) {
+                let val = remainingQueues.shift();
+                utils.insert(newReq, val);
+                count += 1;
+            }
+        }
+        return newReq;
     }
 
     /**
@@ -820,19 +889,17 @@ class ReUDP extends EventEmitter {
      */
     _trySend(packetsGenerator, requestSequences) {
         debuglog(`@_trySend:: id:${packetsGenerator._id}, requestSequences:${requestSequences}`);
-        if (packetsGenerator._delayTimerId) clearTimeout(packetsGenerator._delayTimerId);
+
         if (requestSequences) {
-            if (packetsGenerator._lastRequestSequences && packetsGenerator._lastRequestSequences.length) {
-                requestSequences = this._diffRequestSequences(
-                    requestSequences,
-                    packetsGenerator._lastRequestSequences
-                );
-            }
-            if (requestSequences.length === 0) {
-                delete packetsGenerator._lastRequestSequences;
-                return;
-            }
+            requestSequences = this._diffRequestSequences(
+                requestSequences,
+                packetsGenerator._recivedQueues,
+                packetsGenerator._pendingQueues,
+                packetsGenerator._remainingQueues,
+                packetsGenerator._singleTotal
+            );
         }
+
         const { done, value: packets } = packetsGenerator.next(requestSequences);
         if (done) {
             if (packets) {
@@ -849,10 +916,6 @@ class ReUDP extends EventEmitter {
                 packetsGenerator._queues.set(key, val);
             }
         }
-        packetsGenerator._lastRequestSequences = requestSequences;
-        packetsGenerator._delayTimerId = setTimeout(() => {
-            delete packetsGenerator._lastRequestSequences;
-        }, this._RTT);
     }
 
     /**
