@@ -3,38 +3,8 @@
 const net = require("net");
 const dgram = require("dgram");
 const EventEmitter = require("events");
-const util = require("util");
-const debuglog = function (set) {
-    set = String(set).toUpperCase();
-    const noop = Function();
-    const NODE_DEBUG = process.env.NODE_DEBUG;
-    const pid = process.pid;
-    const logger = (...args) => console.error(
-        "%s %d: %s",
-        set, pid, util.format(...args)
-    );
-    let log;
-    if (new RegExp(String.raw`\b${set}\b`, "i").test(NODE_DEBUG)) {
-        log = logger;
-    } else {
-        log = noop;
-    }
-
-    process.on("SIGUSR2", function () {
-        if (log === logger) {
-            console.error("@SIGUSR2:: debug closed!");
-            log = noop;
-        } else {
-            console.error("@SIGUSR2:: start debug!");
-            log = logger;
-        }
-    });
-
-    return (...args) => log(
-        new Date().toISOString().replace(/^[^T]+T([^Z]+)Z$/i, "$1"), ...args
-    );
-}("reudp");
 const utils = require("./libs/utils.js");
+const debuglog = utils.debuglog("reudp");
 
 const { SendingSession, ReceivingSession } = require("./libs/sessions.js");
 
