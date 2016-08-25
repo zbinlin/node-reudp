@@ -161,3 +161,14 @@ describe("test insert function", function () {
         expect(utils.insert([0, 2, 6], 8)).to.be.eql([0, 2, 6, 8]);
     });
 });
+
+describe("test deleteBy function", function () {
+    it("returns a boolean that indicate a value delete success from an array", function () {
+        expect(utils.deleteBy([], 0)).to.be.false;
+        expect(utils.deleteBy([1], 0)).to.be.false;
+        expect(utils.deleteBy([1], 1)).to.be.true;
+        expect(utils.deleteBy([1, 2, 3], 1)).to.be.true;
+        expect(utils.deleteBy([1, 2, 3], 2)).to.be.true;
+        expect(utils.deleteBy([1, 2, 3], 3)).to.be.true;
+    });
+});

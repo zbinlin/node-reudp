@@ -164,6 +164,11 @@ utils.debuglog = function debuglog(set) {
 
 /**
  * use binary search for a value in a sorted array
+ * @param {number[]} ary
+ * @param {number} val
+ * @param {number} [start=0]
+ * @param {number} [end=ary.length]
+ * @return {number}
  */
 utils.bisect = function bisect(ary, val, start = 0, end = ary.length) {
     while (start < end) {
@@ -179,6 +184,9 @@ utils.bisect = function bisect(ary, val, start = 0, end = ary.length) {
 
 /**
  * insert a value into a sorted array faster
+ * @param {number[]} ary
+ * @param {number} val
+ * @return {number[]}
  */
 utils.insert = function insert(ary, val) {
     let idx = utils.bisect(ary, val);
@@ -186,4 +194,21 @@ utils.insert = function insert(ary, val) {
         ary.splice(idx, 0, val);
     }
     return ary;
+};
+
+
+/**
+ * delete a value from a sorted array
+ * @param {number[]} ary
+ * @param {number} val
+ * @return {boolean}
+ */
+utils.deleteBy = function deleteBy(ary, val) {
+    let idx = utils.bisect(ary, val);
+    if (ary[idx] === val) {
+        ary.splice(idx, 1);
+        return true;
+    } else {
+        return false;
+    }
 };
